@@ -2,7 +2,7 @@
 # @File  : bin2tif_gui.py
 # @Author: Freezinghot
 # @Date  : 2026/7/24
-# @Desc  : BIN转TIF图像工具 - GUI版本（可直接打包）
+# @Desc  : BIN转TIF图像工具 - GUI版本（支持递归子目录，输出目录可选）
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
@@ -22,12 +22,13 @@ class Bin2TifApp:
     def __init__(self, root):
         self.root = root
         self.root.title("BIN转TIF图像工具")
-        self.root.geometry("700x600")
+        self.root.geometry("700x650")
         self.root.resizable(True, True)
 
         # 变量
         self.input_dir = tk.StringVar()
         self.output_dir = tk.StringVar()
+        self.recursive = tk.BooleanVar(value=False)      # 递归搜索标志
         self.status = tk.StringVar(value="就绪")
         self.is_processing = False
 
@@ -60,17 +61,28 @@ class Bin2TifApp:
         ttk.Button(input_frame, text="浏览...", command=self.browse_input,
                    width=10).pack(side=tk.RIGHT)
 
-        # 输出目录
+        # 输出目录（可为空）
         output_frame = ttk.Frame(main_frame)
         output_frame.pack(fill=tk.X, pady=5)
 
         ttk.Label(output_frame, text="输出目录:", font=('微软雅黑', 10)).pack(side=tk.LEFT)
 
-        output_entry = ttk.Entry(output_frame, textvariable=self.output_dir, width=50)
-        output_entry.pack(side=tk.LEFT, padx=(10, 5), fill=tk.X, expand=True)
+        self.output_entry = ttk.Entry(output_frame, textvariable=self.output_dir, width=50)
+        self.output_entry.pack(side=tk.LEFT, padx=(10, 5), fill=tk.X, expand=True)
 
-        ttk.Button(output_frame, text="浏览...", command=self.browse_output,
-                   width=10).pack(side=tk.RIGHT)
+        self.output_btn = ttk.Button(output_frame, text="浏览...", command=self.browse_output,
+                                     width=10)
+        self.output_btn.pack(side=tk.RIGHT)
+
+        # 递归复选框
+        recursive_frame = ttk.Frame(main_frame)
+        recursive_frame.pack(fill=tk.X, pady=5)
+
+        self.recursive_cb = ttk.Checkbutton(recursive_frame,
+                                            text="递归搜索子目录（每个子目录下生成 /tif 文件夹）",
+                                            variable=self.recursive,
+                                            command=self.toggle_output_dir)
+        self.recursive_cb.pack(anchor=tk.W)
 
         # 信息显示框架
         info_frame = ttk.LabelFrame(main_frame, text="文件信息", padding="10")
@@ -138,7 +150,23 @@ class Bin2TifApp:
         self.log_text.tag_config('warning', foreground='orange')
 
         # 初始日志
-        self.log("程序已启动，请选择输入和输出目录", 'info')
+        self.log("程序已启动，请选择输入目录", 'info')
+        self.toggle_output_dir()   # 初始化禁用状态
+
+    def toggle_output_dir(self):
+        """根据递归复选框状态启用/禁用输出目录输入"""
+        if self.recursive.get():
+            self.output_entry.config(state='disabled')
+            self.output_btn.config(state='disabled')
+            self.output_dir.set("")   # 清空，避免混淆
+            self.log("已启用递归模式，输出将自动保存在各子目录下的 /tif 文件夹中", 'info')
+        else:
+            self.output_entry.config(state='normal')
+            self.output_btn.config(state='normal')
+            self.log("已关闭递归模式，输出目录可自定义", 'info')
+        # 重新扫描（若已有输入目录）
+        if self.input_dir.get():
+            self.scan_files()
 
     def browse_input(self):
         """浏览输入目录"""
@@ -151,7 +179,10 @@ class Bin2TifApp:
 
     def browse_output(self):
         """浏览输出目录"""
-        directory = filedialog.askdirectory(title="选择输出目录")
+        if self.recursive.get():
+            messagebox.showinfo("提示", "递归模式下输出目录由程序自动管理，无需手动指定")
+            return
+        directory = filedialog.askdirectory(title="选择输出目录（可选，留空则使用输入目录/tif）")
         if directory:
             self.output_dir.set(directory)
             self.log(f"选择输出目录: {directory}", 'info')
@@ -167,7 +198,7 @@ class Bin2TifApp:
                 messagebox.showwarning("警告", f"输出目录不可写:\n{e}")
 
     def scan_files(self):
-        """扫描输入目录中的文件"""
+        """扫描输入目录中的文件（支持递归）"""
         input_path = self.input_dir.get()
         if not input_path:
             return
@@ -182,7 +213,14 @@ class Bin2TifApp:
             mss_files = []
             pan_files = []
 
-            for file in input_dir.glob("*.bin"):
+            # 根据递归标志选择扫描方式
+            if self.recursive.get():
+                pattern = "**/*.bin"
+                iterator = input_dir.glob(pattern)
+            else:
+                iterator = input_dir.glob("*.bin")
+
+            for file in iterator:
                 if 'w8696_h4000' in file.name:
                     pan_files.append(file)
                 elif 'w2272_h1000' in file.name:
@@ -231,30 +269,35 @@ class Bin2TifApp:
             messagebox.showerror("错误", "请选择输入目录")
             return
 
-        if not self.output_dir.get():
-            messagebox.showerror("错误", "请选择输出目录")
-            return
-
-        # 检查输入目录是否存在
-        if not Path(self.input_dir.get()).exists():
+        input_dir = Path(self.input_dir.get())
+        if not input_dir.exists():
             messagebox.showerror("错误", "输入目录不存在")
             return
 
-        # 检查输出目录
-        output_path = Path(self.output_dir.get())
-        try:
-            output_path.mkdir(parents=True, exist_ok=True)
-            # 测试写入权限
-            test_file = output_path / "test_write.tmp"
-            test_file.touch()
-            test_file.unlink()
-        except Exception as e:
-            messagebox.showerror("错误", f"输出目录无法写入:\n{e}")
-            return
+        # 非递归模式下，若输出目录为空，自动设为输入目录/tif
+        if not self.recursive.get():
+            if not self.output_dir.get():
+                auto_output = input_dir / "tif"
+                self.output_dir.set(str(auto_output))
+                self.log(f"输出目录未指定，自动设为: {auto_output}", 'info')
+            # 检查输出目录是否可写
+            output_path = Path(self.output_dir.get())
+            try:
+                output_path.mkdir(parents=True, exist_ok=True)
+                test_file = output_path / "test_write.tmp"
+                test_file.touch()
+                test_file.unlink()
+            except Exception as e:
+                messagebox.showerror("错误", f"输出目录无法写入:\n{e}")
+                return
+        else:
+            # 递归模式：输出目录由程序自动管理，无需提前创建
+            # 但可以提示用户
+            self.log("递归模式：将在每个包含BIN文件的子目录下创建 /tif 文件夹", 'info')
 
-        # 确认操作
-        if not messagebox.askyesno("确认", "确定要开始转换吗？"):
-            return
+        # # 确认操作
+        # if not messagebox.askyesno("确认", "确定要开始转换吗？"):
+        #     return
 
         # 禁用按钮，启动进度条
         self.start_btn.config(state=tk.DISABLED)
@@ -278,23 +321,26 @@ class Bin2TifApp:
         self.status.set("正在停止...")
 
     def process_files(self):
-        """处理文件"""
+        """处理文件（支持递归，动态确定输出目录）"""
         try:
             input_dir = Path(self.input_dir.get())
-            output_dir = Path(self.output_dir.get())
+            recursive = self.recursive.get()
 
-            # 收集文件
+            # 收集所有BIN文件（递归或非递归）
             mss_files = []
             pan_files = []
+            if recursive:
+                iterator = input_dir.rglob("*.bin")
+            else:
+                iterator = input_dir.glob("*.bin")
 
-            for file in input_dir.glob("*.bin"):
+            for file in iterator:
                 if 'w8696_h4000' in file.name:
                     pan_files.append(file)
                 elif 'w2272_h1000' in file.name:
                     mss_files.append(file)
 
             total_files = len(mss_files) + len(pan_files)
-
             if total_files == 0:
                 self.log("没有找到需要处理的文件", 'error')
                 self.processing_done()
@@ -302,22 +348,48 @@ class Bin2TifApp:
 
             self.log(f"找到 {len(mss_files)} 个MSS文件, {len(pan_files)} 个PAN文件", 'info')
 
-            # 处理MSS文件
-            if mss_files and self.is_processing:
-                self.log(f"开始处理MSS文件 ({len(mss_files)} 个)", 'info')
-                self.process_mss_files(mss_files, output_dir)
+            # 准备处理（将所有文件合并到一个列表，并记录类型）
+            all_files = [(f, 'mss') for f in mss_files] + [(f, 'pan') for f in pan_files]
+            processed = 0
 
-            # 处理PAN文件
-            if pan_files and self.is_processing:
-                self.log(f"开始处理PAN文件 ({len(pan_files)} 个)", 'info')
-                self.process_pan_files(pan_files, output_dir)
+            for file_path, ftype in all_files:
+                if not self.is_processing:
+                    break
+
+                # 确定输出目录
+                if recursive:
+                    # 每个文件所在目录下的 /tif
+                    out_dir = file_path.parent / "tif"
+                else:
+                    # 使用用户指定的输出目录
+                    out_dir = Path(self.output_dir.get())
+
+                # 确保输出目录存在
+                try:
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    self.log(f"无法创建输出目录 {out_dir}: {e}", 'error')
+                    continue
+
+                # 处理文件
+                try:
+                    self.log(f"处理 {ftype.upper()}: {file_path.name}", 'info')
+                    if ftype == 'mss':
+                        self.mss_split_bin2raw(file_path, out_dir)
+                    else:
+                        self.pan_bin2tif_fast(file_path, out_dir)
+                    processed += 1
+                    self.update_progress(processed, total_files)
+                    self.log(f"完成: {file_path.name}", 'success')
+                except Exception as e:
+                    self.log(f"处理 {file_path.name} 时出错: {e}", 'error')
 
             # 完成
             if self.is_processing:
-                self.log("所有文件处理完成！", 'success')
-                messagebox.showinfo("完成", f"转换完成！\n处理了 {total_files} 个文件")
+                self.log(f"所有文件处理完成！共处理 {processed} 个文件", 'success')
+                messagebox.showinfo("完成", f"转换完成！\n处理了 {processed} 个文件")
             else:
-                self.log("处理已被用户停止", 'warning')
+                self.log(f"处理已被用户停止，已处理 {processed} 个文件", 'warning')
 
         except Exception as e:
             error_msg = traceback.format_exc()
@@ -326,38 +398,7 @@ class Bin2TifApp:
         finally:
             self.processing_done()
 
-    def process_mss_files(self, mss_files, output_dir):
-        """处理MSS文件"""
-        total = len(mss_files)
-
-        for idx, file_path in enumerate(mss_files, 1):
-            if not self.is_processing:
-                break
-
-            try:
-                self.log(f"处理MSS: {file_path.name}", 'info')
-                self.mss_split_bin2raw(file_path, output_dir)
-                self.update_progress(idx, total)
-                self.log(f"完成: {file_path.name}", 'success')
-            except Exception as e:
-                self.log(f"处理 {file_path.name} 时出错: {e}", 'error')
-
-    def process_pan_files(self, pan_files, output_dir):
-        """处理PAN文件"""
-        total = len(pan_files)
-
-        for idx, file_path in enumerate(pan_files, 1):
-            if not self.is_processing:
-                break
-
-            try:
-                self.log(f"处理PAN: {file_path.name}", 'info')
-                self.pan_bin2tif_fast(file_path, output_dir)
-                self.update_progress(idx, total)
-                self.log(f"完成: {file_path.name}", 'success')
-            except Exception as e:
-                self.log(f"处理 {file_path.name} 时出错: {e}", 'error')
-
+    # ---- 以下三个处理函数保持原样，仅接收文件路径和输出目录 ----
     def mss_split_bin2raw(self, mss_binname, output_dir):
         """MSS BIN转TIF"""
         basename = os.path.basename(mss_binname)
@@ -399,27 +440,8 @@ class Bin2TifApp:
                 unpack_bytes = self.convert_16bit_to_12bit(data_bytes)
                 tifffile.imwrite(b4_filename, unpack_bytes, photometric='minisblack')
 
-    def pan_bin2raw(self, pan_filename, output_dir):
-        """PAN BIN转TIF"""
-        basename = os.path.basename(pan_filename)
-        export_filename = os.path.join(output_dir, 'P_' + basename.replace('bin', 'tif'))
-
-        with open(pan_filename, 'rb') as bf:
-            bf_data = bf.read()
-
-        n = 17392  # (8568+128) * 2
-        pf_split = [bf_data[i:i + n] for i in range(0, len(bf_data), n)]
-
-        # 处理数据
-        all_data = b''
-        for pf in pf_split:
-            trimmed = pf[256:]
-            all_data += trimmed
-
-        unpack_bytes = self.convert_16bit_to_12bit(all_data, width=8568)
-        tifffile.imwrite(export_filename, unpack_bytes, photometric='minisblack')
-
     def pan_bin2tif_fast(self, pan_filename, output_dir):
+        """PAN BIN转TIF（快速内存映射版）"""
         basename = os.path.basename(pan_filename)
         export_filename = os.path.join(output_dir, 'P_' + basename.replace('bin', 'tif'))
 
@@ -427,7 +449,7 @@ class Bin2TifApp:
         raw_bytes = np.memmap(pan_filename, dtype=np.uint8, mode='r')
 
         frame_size = 17392  # 每帧字节数
-        header_size = 256  # 帧头部长度
+        header_size = 256   # 帧头部长度
         data_bytes_per_frame = 17136  # 8568 * 2
         width = 8568
 
@@ -440,47 +462,36 @@ class Bin2TifApp:
         frames = raw_bytes.reshape(num_frames, frame_size)[:, header_size:]
 
         # 将 (num_frames, 17136) 的 uint8 视为 (num_frames, 8568) 的 uint16
-        # 注意：需要保证内存连续，reshape 后副本可能是非连续的，需 .copy()
         data_16bit = np.ascontiguousarray(frames).view(np.uint16)
         data_16bit = data_16bit.reshape(num_frames, width)
 
-        # ---- 关键步骤：16-bit → 12-bit 转换 ----
-        # 常见两种情形：
-        # 1) 12-bit 数据左对齐（高12位有效）→ 右移4位
-        # 2) 12-bit 数据右对齐（低12位有效）→ 取低12位
-        # 根据实际传感器调整，这里假设左对齐：
-        img_12bit = data_16bit >> 4  # 或者 data_16bit & 0x0FFF
+        # 16-bit → 12-bit 转换（左对齐高12位）
+        img_12bit = data_16bit >> 4
 
-        # 保存为 TIFF（自动压缩？建议关闭）
+        # 保存为 TIFF
         tifffile.imwrite(export_filename, img_12bit.astype(np.uint16), photometric='minisblack')
-
 
     def convert_16bit_to_12bit(self, data_bytes, mode='low', endian='little', width=2142):
         """
         批量转换2字节数据为12位值，返回uint16数组
-
         Args:
             data_bytes: bytes对象
             mode: 'low' - 数据在低12位; 'shift' - 数据左移4位
             endian: 'little' 或 'big'
             width: 图像宽度
-
         Returns:
             np.ndarray: uint16类型的12位值数组 (0-4095)
         """
         if len(data_bytes) % 2 != 0:
             raise ValueError("数据长度必须是2的倍数")
 
-        # 将bytes转换为uint16数组（根据端序）
         if endian == 'little':
-            dtype = np.dtype('<u2')  # 小端序 uint16
+            dtype = np.dtype('<u2')
         else:
-            dtype = np.dtype('>u2')  # 大端序 uint16
+            dtype = np.dtype('>u2')
 
-        # 直接转换为uint16数组
         values_16bit = np.frombuffer(data_bytes, dtype=dtype)
 
-        # 提取12位值
         if mode == 'low':
             values_12bit = values_16bit & 0xFFF
         elif mode == 'shift':
@@ -488,7 +499,6 @@ class Bin2TifApp:
         else:
             raise ValueError("mode必须是 'low' 或 'shift'")
 
-        # 重塑为二维数组
         height = len(values_12bit) // width
         return values_12bit.astype(np.uint16).reshape(height, width)
 
@@ -510,8 +520,6 @@ class Bin2TifApp:
 
         self.root.destroy()
 
-
-# ==================== 打包启动函数 ====================
 
 def main():
     """主函数"""
