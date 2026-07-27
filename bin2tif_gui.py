@@ -352,7 +352,7 @@ class Bin2TifApp:
 
             try:
                 self.log(f"处理PAN: {file_path.name}", 'info')
-                self.pan_bin2raw(file_path, output_dir)
+                self.pan_bin2tif_fast(file_path, output_dir)
                 self.update_progress(idx, total)
                 self.log(f"完成: {file_path.name}", 'success')
             except Exception as e:
@@ -418,6 +418,42 @@ class Bin2TifApp:
 
         unpack_bytes = self.convert_16bit_to_12bit(all_data, width=8568)
         tifffile.imwrite(export_filename, unpack_bytes, photometric='minisblack')
+
+    def pan_bin2tif_fast(self, pan_filename, output_dir):
+        basename = os.path.basename(pan_filename)
+        export_filename = os.path.join(output_dir, 'P_' + basename.replace('bin', 'tif'))
+
+        # 映射整个文件为 uint8 数组（不占内存）
+        raw_bytes = np.memmap(pan_filename, dtype=np.uint8, mode='r')
+
+        frame_size = 17392  # 每帧字节数
+        header_size = 256  # 帧头部长度
+        data_bytes_per_frame = 17136  # 8568 * 2
+        width = 8568
+
+        # 计算帧数
+        num_frames = len(raw_bytes) // frame_size
+        # 丢弃文件末尾不完整帧（如果有）
+        raw_bytes = raw_bytes[:num_frames * frame_size]
+
+        # 重塑为 (帧数, frame_size)，并去掉头部
+        frames = raw_bytes.reshape(num_frames, frame_size)[:, header_size:]
+
+        # 将 (num_frames, 17136) 的 uint8 视为 (num_frames, 8568) 的 uint16
+        # 注意：需要保证内存连续，reshape 后副本可能是非连续的，需 .copy()
+        data_16bit = np.ascontiguousarray(frames).view(np.uint16)
+        data_16bit = data_16bit.reshape(num_frames, width)
+
+        # ---- 关键步骤：16-bit → 12-bit 转换 ----
+        # 常见两种情形：
+        # 1) 12-bit 数据左对齐（高12位有效）→ 右移4位
+        # 2) 12-bit 数据右对齐（低12位有效）→ 取低12位
+        # 根据实际传感器调整，这里假设左对齐：
+        img_12bit = data_16bit >> 4  # 或者 data_16bit & 0x0FFF
+
+        # 保存为 TIFF（自动压缩？建议关闭）
+        tifffile.imwrite(export_filename, img_12bit.astype(np.uint16), photometric='minisblack')
+
 
     def convert_16bit_to_12bit(self, data_bytes, mode='low', endian='little', width=2142):
         """

@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='Bin2Tif',
+    name='BIN2TIF',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
