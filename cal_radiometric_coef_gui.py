@@ -1,21 +1,29 @@
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-import tkinter.simpledialog
 import numpy as np
 import pandas as pd
 
-# ======================== 核心函数 ========================
+try:
+    import matplotlib
+    matplotlib.use("TkAgg")
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+
+
+# ======================== 核心计算函数 ========================
 def read_means_from_csv(file_path):
-    """从CSV文件中读取名为 Mean_Value 的列，返回list"""
     df = pd.read_csv(file_path)
     if 'Mean_Value' not in df.columns:
-        raise ValueError(f"文件 {file_path} 中不存在列 'Mean_Value'")
+        raise ValueError(f"File {file_path} does not contain column 'Mean_Value'")
     return df['Mean_Value'].astype(float).tolist()
 
+
 def calculate_multi_point_coeffs_from_means(dark_mean, light_means_list, L_values):
-    """利用各亮度下像元均值（1×N）计算两点校正系数，返回 G, O"""
-    all_means = np.vstack([dark_mean] + light_means_list)  # (M+1, N)
+    all_means = np.vstack([dark_mean] + light_means_list)
     L = np.asarray(L_values, dtype=np.float64)
     L_mean = np.mean(L)
 
@@ -31,7 +39,7 @@ def calculate_multi_point_coeffs_from_means(dark_mean, light_means_list, L_value
 
     valid = a > 1e-9
     if not np.any(valid):
-        raise ValueError("所有像元斜率均接近0，无法计算参考直线。")
+        raise ValueError("All pixel slopes are near zero, cannot compute reference line.")
 
     A_ref = np.mean(a[valid])
     B_ref = np.mean(b[valid])
@@ -42,227 +50,446 @@ def calculate_multi_point_coeffs_from_means(dark_mean, light_means_list, L_value
     O[valid] = B_ref - G[valid] * b[valid]
     O[~valid] = B_ref
 
-    return G, O
+    return G, O, a, b
 
-# ======================== GUI 应用程序类 ========================
+
+def calc_fit_r2(all_means, L_vals, a, b):
+    N = all_means.shape[1]
+    r2 = np.zeros(N)
+    for i in range(N):
+        y = all_means[:, i]
+        y_pred = a[i] * L_vals + b[i]
+        ss_res = np.sum((y - y_pred) ** 2)
+        ss_tot = np.sum((y - np.mean(y)) ** 2)
+        if ss_tot < 1e-12:
+            r2[i] = 1.0
+        else:
+            r2[i] = 1 - ss_res / ss_tot
+    return r2
+
+
+# ======================== 应用程序类 ========================
 class RadiometricCalibrationApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("相对辐射定标系数计算器")
-        self.root.geometry("800x550")
+        self.root.title("Relative Radiometric Calibration Coefficients Calculator")
+        self.root.geometry("1100x650")
 
-        # 存储文件数据：每行 {'path': str, 'L': float, 'item_id': str}
         self.file_records = []
+        self.current_edit_item = None
+        self.current_edit_column = None
+        self.edit_entry = None
+
+        # 计算结果存储
+        self.G = None
+        self.O = None
+        self.fit_a = None
+        self.fit_b = None
+        self.fit_r2 = None
+        self.all_means = None
+        self.L_arr = None
+
+        # matplotlib 画布
+        self.canvas = None
+        self.ax = None
+        self.fig = None
 
         self.create_widgets()
+        self._bind_tree_edit_events()
 
+    # ------------------------------------------------------------------
+    # 界面构建（左右分栏）
+    # ------------------------------------------------------------------
     def create_widgets(self):
-        # 说明标签
-        ttk.Label(self.root, text="添加定标数据文件（CSV，含Mean_Value列），并指定每个文件的辐射亮度（暗场设为0）",
+        # 主面板：左侧文件管理，右侧拟合显示
+        main_pw = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main_pw.pack(fill=tk.BOTH, expand=True)
+
+        # ----- 左侧：文件管理区域 -----
+        left_frame = ttk.Frame(main_pw)
+        main_pw.add(left_frame, weight=1)
+
+        ttk.Label(left_frame,
+                  text="Add calibration data files (CSV with 'Mean_Value' column). Double-click 'Radiance' to edit.",
                   padding=5).pack(anchor=tk.W, padx=10, pady=5)
 
-        # 文件表格区域
-        frame_table = ttk.Frame(self.root)
+        # 表格
+        frame_table = ttk.Frame(left_frame)
         frame_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        columns = ("文件路径", "辐射亮度")
+        columns = ("File Path", "Radiance")
         self.tree = ttk.Treeview(frame_table, columns=columns, show="headings", height=10)
-        self.tree.heading("文件路径", text="文件路径")
-        self.tree.heading("辐射亮度", text="辐射亮度")
-        self.tree.column("文件路径", width=550)
-        self.tree.column("辐射亮度", width=100, anchor="center")
+        self.tree.heading("File Path", text="File Path")
+        self.tree.heading("Radiance", text="Radiance")
+        self.tree.column("File Path", width=400)
+        self.tree.column("Radiance", width=100, anchor="center")
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         scrollbar = ttk.Scrollbar(frame_table, orient=tk.VERTICAL, command=self.tree.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.configure(yscrollcommand=scrollbar.set)
 
-        # 双击辐射亮度单元格可编辑
-        self.tree.bind("<Double-1>", self.on_double_click)
-
         # 按钮区
-        btn_frame = ttk.Frame(self.root)
+        btn_frame = ttk.Frame(left_frame)
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        ttk.Button(btn_frame, text="添加文件（可多选）", command=self.add_files).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="删除选中文件", command=self.remove_files).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="修改选中辐亮度", command=self.edit_radiance).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Add Files", command=self.add_files).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Remove Selected", command=self.remove_files).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Edit Radiance", command=self.edit_selected_radiance).pack(side=tk.LEFT, padx=5)
 
-        # 计算/保存区
-        calc_frame = ttk.Frame(self.root)
+        calc_frame = ttk.Frame(left_frame)
         calc_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        self.btn_calc = ttk.Button(calc_frame, text="计算定标系数", command=self.calculate)
+        self.btn_calc = ttk.Button(calc_frame, text="Calculate Coefficients", command=self.calculate)
         self.btn_calc.pack(side=tk.LEFT, padx=5)
 
-        self.btn_save = ttk.Button(calc_frame, text="保存系数...", state=tk.DISABLED, command=self.save_coeffs)
+        self.btn_save = ttk.Button(calc_frame, text="Save Coefficients...", state=tk.DISABLED, command=self.save_coeffs)
         self.btn_save.pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(calc_frame, text="退出", command=self.root.destroy).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(calc_frame, text="Exit", command=self.root.destroy).pack(side=tk.RIGHT, padx=5)
 
-        # 状态栏
-        self.status_var = tk.StringVar(value="就绪")
-        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        # 状态栏（左下方）
+        self.status_var = tk.StringVar(value="Ready")
+        status_bar = ttk.Label(left_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=2)
 
-        # 存储计算结果
-        self.G = None
-        self.O = None
+        # ----- 右侧：拟合结果显示 -----
+        right_frame = ttk.Frame(main_pw)
+        main_pw.add(right_frame, weight=1)
 
-    def add_files(self):
-        """打开多选文件对话框，添加文件到列表，默认辐亮度为0"""
-        filenames = filedialog.askopenfilenames(
-            title="选择定标数据CSV文件（可多选）",
-            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
-        )
-        for f in filenames:
-            # 避免重复添加相同路径
-            if any(rec['path'] == f for rec in self.file_records):
-                continue
-            item_id = self.tree.insert("", tk.END, values=(f, "0.0"))
-            self.file_records.append({'path': f, 'L': 0.0, 'item_id': item_id})
-        if filenames:
-            self.status_var.set(f"已添加 {len(filenames)} 个文件")
+        # 统计信息标签
+        self.stats_text = tk.StringVar(value="Fit accuracy will be shown here after calculation.")
+        ttk.Label(right_frame, textvariable=self.stats_text, font=("TkDefaultFont", 10, "bold"),
+                  padding=10).pack(anchor=tk.W)
+
+        # 像元选择区域
+        pixel_frame = ttk.Frame(right_frame)
+        pixel_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        ttk.Label(pixel_frame, text="Pixel index for fit plot:").pack(side=tk.LEFT)
+        self.pixel_entry = ttk.Entry(pixel_frame, width=8)
+        self.pixel_entry.pack(side=tk.LEFT, padx=5)
+        self.pixel_entry.insert(0, "0")
+        self.pixel_entry.bind("<Return>", lambda e: self.update_plot())
+        ttk.Button(pixel_frame, text="Plot", command=self.update_plot).pack(side=tk.LEFT, padx=5)
+
+        # 拟合曲线画布容器
+        self.plot_frame = ttk.Frame(right_frame)
+        self.plot_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        if MATPLOTLIB_AVAILABLE:
+            self.init_plot_canvas()
         else:
-            self.status_var.set("未选择文件")
+            ttk.Label(self.plot_frame, text="matplotlib not installed. Plot unavailable.",
+                      foreground="red").pack(anchor=tk.CENTER, expand=True)
 
-    def remove_files(self):
-        """删除选中的文件"""
-        selected = self.tree.selection()
-        if not selected:
-            messagebox.showwarning("未选择", "请先选择要删除的文件。")
-            return
-        for item in selected:
-            self.tree.delete(item)
-            self.file_records = [rec for rec in self.file_records if rec['item_id'] != item]
-        self.status_var.set(f"已删除 {len(selected)} 个文件")
+    def init_plot_canvas(self):
+        """初始化 matplotlib 画布（空白）"""
+        self.fig = Figure(figsize=(5, 4), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_title("No data yet")
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    def on_double_click(self, event):
-        """双击辐射亮度单元格弹出编辑框"""
+    # ------------------------------------------------------------------
+    # 表格编辑功能（保持不变）
+    # ------------------------------------------------------------------
+    def _bind_tree_edit_events(self):
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
+        self.tree.bind("<Up>", self.on_arrow_key)
+        self.tree.bind("<Down>", self.on_arrow_key)
+
+    def on_tree_double_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
         if region != "cell":
             return
         column = self.tree.identify_column(event.x)
         item = self.tree.identify_row(event.y)
-        if column == "#2":  # 第二列（辐射亮度）
-            self._edit_cell(item)
+        if column == "#2" and item:
+            self._start_edit(item, column)
 
-    def edit_radiance(self):
-        """通过按钮修改选中行的辐亮度"""
+    def edit_selected_radiance(self):
         selected = self.tree.selection()
         if not selected:
-            messagebox.showwarning("未选择", "请先选择要修改的文件。")
+            messagebox.showwarning("No selection", "Please select a file to edit.")
             return
         if len(selected) > 1:
-            messagebox.showwarning("多选", "一次只能修改一个文件的辐亮度。")
+            messagebox.showwarning("Multiple selection", "Only one file can be edited at a time.")
             return
-        self._edit_cell(selected[0])
+        self._start_edit(selected[0], "#2")
 
-    def _edit_cell(self, item_id):
-        """弹窗输入新的辐亮度值"""
-        # 查找记录
-        rec = next((r for r in self.file_records if r['item_id'] == item_id), None)
+    def _start_edit(self, item, column):
+        if self.edit_entry is not None:
+            self._accept_edit()
+
+        bbox = self.tree.bbox(item, column)
+        if not bbox:
+            return
+        x, y, width, height = bbox
+
+        rec = next((r for r in self.file_records if r['item_id'] == item), None)
         if not rec:
             return
-        new_val = tk.simpledialog.askfloat(
-            "修改辐射亮度",
-            f"文件:\n{os.path.basename(rec['path'])}\n当前值: {rec['L']}\n请输入新的辐射亮度：",
-            initialvalue=rec['L']
-        )
-        if new_val is not None:
-            rec['L'] = new_val
-            self.tree.set(item_id, "辐射亮度", f"{new_val:.4f}")
+        current_val = f"{rec['L']:.4f}"
 
-    def calculate(self):
-        """从表格收集数据，分离暗场与亮场，计算系数"""
-        if not self.file_records:
-            messagebox.showerror("无数据", "请先添加定标数据文件。")
+        self.edit_entry = tk.Entry(self.tree, width=12)
+        self.edit_entry.place(x=x, y=y, width=width, height=height)
+        self.edit_entry.insert(0, current_val)
+        self.edit_entry.select_range(0, tk.END)
+        self.edit_entry.focus_set()
+
+        self.edit_entry.bind("<Return>", lambda e: self._accept_edit())
+        self.edit_entry.bind("<Escape>", lambda e: self._cancel_edit())
+        self.edit_entry.bind("<Up>", self._on_edit_up)
+        self.edit_entry.bind("<Down>", self._on_edit_down)
+        self.edit_entry.bind("<FocusOut>", self._on_focus_out)
+
+        self.current_edit_item = item
+        self.current_edit_column = column
+
+    def _accept_edit(self):
+        if self.edit_entry is None:
+            return
+        new_text = self.edit_entry.get()
+        try:
+            new_val = float(new_text)
+        except ValueError:
+            messagebox.showwarning("Invalid input", "Please enter a valid number.")
+            self._cancel_edit()
             return
 
-        # 构建按辐亮度排序的列表
+        rec = next((r for r in self.file_records if r['item_id'] == self.current_edit_item), None)
+        if rec:
+            rec['L'] = new_val
+            self.tree.set(self.current_edit_item, "Radiance", f"{new_val:.4f}")
+
+        self._destroy_edit()
+
+    def _cancel_edit(self):
+        self._destroy_edit()
+
+    def _destroy_edit(self):
+        if self.edit_entry:
+            self.edit_entry.destroy()
+            self.edit_entry = None
+        self.current_edit_item = None
+        self.current_edit_column = None
+
+    def _on_focus_out(self, event):
+        if self.edit_entry:
+            self.root.after(100, self._auto_accept_if_idle)
+
+    def _auto_accept_if_idle(self):
+        if self.edit_entry and self.edit_entry.focus_get() != self.edit_entry:
+            self._accept_edit()
+
+    def on_arrow_key(self, event):
+        if self.edit_entry is None:
+            return
+
+    def _on_edit_up(self, event):
+        self._accept_edit()
+        self._move_edit_row(-1)
+        return "break"
+
+    def _on_edit_down(self, event):
+        self._accept_edit()
+        self._move_edit_row(1)
+        return "break"
+
+    def _move_edit_row(self, offset):
+        all_items = self.tree.get_children()
+        if not all_items:
+            return
+        prev = self.current_edit_item
+        if prev in all_items:
+            idx = all_items.index(prev)
+            new_idx = (idx + offset) % len(all_items)
+        else:
+            new_idx = 0
+        self._start_edit(all_items[new_idx], "#2")
+
+    # ------------------------------------------------------------------
+    # 文件添加/删除
+    # ------------------------------------------------------------------
+    def add_files(self):
+        filenames = filedialog.askopenfilenames(
+            title="Select CSV files",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        for f in filenames:
+            if any(rec['path'] == f for rec in self.file_records):
+                continue
+            item_id = self.tree.insert("", tk.END, values=(f, "0.0000"))
+            self.file_records.append({'path': f, 'L': 0.0, 'item_id': item_id})
+        if filenames:
+            self.status_var.set(f"Added {len(filenames)} file(s)")
+        else:
+            self.status_var.set("No files selected")
+
+    def remove_files(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("No selection", "Please select files to remove.")
+            return
+        if self.edit_entry and self.current_edit_item in selected:
+            self._cancel_edit()
+        for item in selected:
+            self.tree.delete(item)
+            self.file_records = [rec for rec in self.file_records if rec['item_id'] != item]
+        self.status_var.set(f"Removed {len(selected)} file(s)")
+
+    # ------------------------------------------------------------------
+    # 计算定标系数
+    # ------------------------------------------------------------------
+    def calculate(self):
+        if not self.file_records:
+            messagebox.showerror("No data", "Please add calibration files first.")
+            return
+
         records = sorted(self.file_records, key=lambda x: x['L'])
-        # 分离暗场（L=0）文件
         dark_recs = [r for r in records if r['L'] == 0.0]
         if not dark_recs:
-            messagebox.showerror("缺少暗场", "至少需要一个辐射亮度为 0 的文件作为暗场。")
+            messagebox.showerror("Dark missing", "At least one file with radiance 0 is required as dark frame.")
             return
-        # 如果有多个暗场，取第一个，其余忽略或可提示
         if len(dark_recs) > 1:
-            messagebox.showwarning("多个暗场", "检测到多个辐射亮度为0的文件，将只使用第一个作为暗场，其余将被忽略。")
+            messagebox.showwarning("Multiple darks", "Multiple files with radiance 0 detected. Only the first will be used as dark.")
         dark_rec = dark_recs[0]
 
-        # 亮场文件（L ≠ 0）
         light_recs = [r for r in records if r['L'] != 0.0]
         if not light_recs:
-            messagebox.showerror("缺少亮场", "至少需要一个辐射亮度不为0的亮场文件。")
+            messagebox.showerror("Light missing", "At least one file with non-zero radiance is required.")
             return
 
-        # 检查亮度值是否唯一（避免除零等问题）
         L_set = set(r['L'] for r in records)
         if len(L_set) < 2:
-            messagebox.showerror("亮度值不足", "所有文件的辐射亮度必须至少包含两个不同的值（含0）。")
+            messagebox.showerror("Insufficient radiance values", "At least two distinct radiance values (including 0) are needed.")
             return
 
-        # 读取暗场均值
+        # 读取数据
         try:
             dark_mean = np.array(read_means_from_csv(dark_rec['path']))
         except Exception as e:
-            messagebox.showerror("读取暗场失败", f"无法读取暗场文件：\n{dark_rec['path']}\n错误：{e}")
+            messagebox.showerror("Dark read error", f"Cannot read dark file:\n{dark_rec['path']}\nError: {e}")
             return
 
-        # 读取亮场均值，并收集亮度值
         light_means = []
-        L_vals = [0.0]  # 暗场对应0
+        L_vals = [0.0]
         for rec in light_recs:
             try:
                 mean_arr = np.array(read_means_from_csv(rec['path']))
                 light_means.append(mean_arr)
                 L_vals.append(rec['L'])
             except Exception as e:
-                messagebox.showerror("读取亮场失败", f"文件：\n{rec['path']}\n错误：{e}")
+                messagebox.showerror("Light read error", f"File:\n{rec['path']}\nError: {e}")
                 return
 
-        # 检查像元数一致性
         N = len(dark_mean)
         for i, arr in enumerate(light_means):
             if len(arr) != N:
-                messagebox.showerror("尺寸不一致",
-                    f"暗场像元数({N})与亮场文件\n{light_recs[i]['path']}\n的像元数({len(arr)})不一致。")
+                messagebox.showerror("Size mismatch",
+                    f"Dark pixel count ({N}) differs from light file\n{light_recs[i]['path']}\n({len(arr)}).")
                 return
 
-        # 计算定标系数
+        # 计算
         try:
-            self.G, self.O = calculate_multi_point_coeffs_from_means(dark_mean, light_means, L_vals)
+            G, O, a, b = calculate_multi_point_coeffs_from_means(dark_mean, light_means, L_vals)
         except Exception as e:
-            messagebox.showerror("计算失败", f"定标系数计算失败：{e}")
+            messagebox.showerror("Calculation failed", f"Error: {e}")
             return
 
-        # 更新界面
-        self.btn_save.config(state=tk.NORMAL)
-        self.status_var.set(
-            f"计算完成：{N}个像元，增益范围 [{self.G.min():.4f}, {self.G.max():.4f}]，"
-            f"偏置范围 [{self.O.min():.4f}, {self.O.max():.4f}]"
-        )
-        messagebox.showinfo("计算成功", "定标系数计算完成，可点击“保存系数”导出。")
+        all_means = np.vstack([dark_mean] + light_means)
+        L_arr = np.array(L_vals)
+        r2 = calc_fit_r2(all_means, L_arr, a, b)
 
+        self.G = G
+        self.O = O
+        self.fit_a = a
+        self.fit_b = b
+        self.fit_r2 = r2
+        self.all_means = all_means
+        self.L_arr = L_arr
+
+        self.btn_save.config(state=tk.NORMAL)
+
+        # 更新统计信息
+        stats = (
+            f"Calibration completed.\n"
+            f"Pixels: {N}\n"
+            f"Gain range: [{G.min():.4f}, {G.max():.4f}]\n"
+            f"Offset range: [{O.min():.4f}, {O.max():.4f}]\n"
+            f"R²   min: {r2.min():.6f}   max: {r2.max():.6f}   mean: {r2.mean():.6f}"
+        )
+        self.stats_text.set(stats)
+
+        # 自动绘制像元0
+        self.update_plot(default_idx=0)
+
+    # ------------------------------------------------------------------
+    # 绘制指定像元的拟合曲线
+    # ------------------------------------------------------------------
+    def update_plot(self, default_idx=None):
+        if not MATPLOTLIB_AVAILABLE or self.all_means is None:
+            if default_idx is not None:
+                messagebox.showinfo("No plot", "Calculation data is not available.")
+            return
+
+        # 获取用户输入的像元索引
+        if default_idx is not None:
+            idx_str = str(default_idx)
+            self.pixel_entry.delete(0, tk.END)
+            self.pixel_entry.insert(0, idx_str)
+        else:
+            idx_str = self.pixel_entry.get().strip()
+        try:
+            pix_idx = int(idx_str)
+        except ValueError:
+            messagebox.showerror("Invalid index", "Please enter a valid integer pixel index.")
+            return
+
+        if pix_idx < 0 or pix_idx >= len(self.fit_a):
+            messagebox.showerror("Index out of range", f"Pixel index must be between 0 and {len(self.fit_a)-1}.")
+            return
+
+        # 清除旧图
+        self.ax.clear()
+
+        i = pix_idx
+        y_real = self.all_means[:, i]
+        x_vals = self.L_arr
+        y_fit = self.fit_a[i] * x_vals + self.fit_b[i]
+
+        self.ax.scatter(x_vals, y_real, color='blue', label='Measured mean')
+        self.ax.plot(x_vals, y_fit, 'r-', label=f'Fit (R² = {self.fit_r2[i]:.6f})')
+        self.ax.set_xlabel("Radiance L")
+        self.ax.set_ylabel("Pixel mean")
+        self.ax.set_title(f"Pixel #{pix_idx} linear fit")
+        self.ax.legend()
+        self.ax.grid(True)
+
+        self.canvas.draw()
+
+    # ------------------------------------------------------------------
+    # 保存系数
+    # ------------------------------------------------------------------
     def save_coeffs(self):
-        """保存增益和偏置系数到CSV"""
         if self.G is None or self.O is None:
             return
         file_path = filedialog.asksaveasfilename(
             defaultextension=".csv",
-            filetypes=[("CSV文件", "*.csv")],
-            title="保存定标系数"
+            filetypes=[("CSV files", "*.csv")],
+            title="Save calibration coefficients"
         )
         if not file_path:
             return
         try:
             df = pd.DataFrame({"Gain": self.G, "Offset": self.O})
             df.to_csv(file_path, index=False)
-            self.status_var.set(f"系数已保存至 {file_path}")
-            messagebox.showinfo("保存成功", f"定标系数已保存到:\n{file_path}")
+            self.status_var.set(f"Coefficients saved to {file_path}")
+            messagebox.showinfo("Save successful", f"Coefficients saved to:\n{file_path}")
         except Exception as e:
-            messagebox.showerror("保存失败", str(e))
+            messagebox.showerror("Save failed", str(e))
+
 
 # ======================== 主入口 ========================
 if __name__ == "__main__":

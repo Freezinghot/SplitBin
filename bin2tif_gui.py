@@ -466,10 +466,10 @@ class Bin2TifApp:
         data_16bit = data_16bit.reshape(num_frames, width)
 
         # 16-bit → 12-bit 转换（左对齐高12位）
-        img_12bit = data_16bit >> 4
+        # img_12bit = data_16bit >> 4
 
         # 保存为 TIFF
-        tifffile.imwrite(export_filename, img_12bit.astype(np.uint16), photometric='minisblack')
+        tifffile.imwrite(export_filename, data_16bit.astype(np.uint16), photometric='minisblack')
 
     def convert_16bit_to_12bit(self, data_bytes, mode='low', endian='little', width=2142):
         """
@@ -492,15 +492,15 @@ class Bin2TifApp:
 
         values_16bit = np.frombuffer(data_bytes, dtype=dtype)
 
-        if mode == 'low':
-            values_12bit = values_16bit & 0xFFF
-        elif mode == 'shift':
-            values_12bit = values_16bit >> 4
-        else:
-            raise ValueError("mode必须是 'low' 或 'shift'")
+        # if mode == 'low':
+        #     values_12bit = values_16bit & 0xFFF
+        # elif mode == 'shift':
+        #     values_12bit = values_16bit >> 4
+        # else:
+        #     raise ValueError("mode必须是 'low' 或 'shift'")
 
-        height = len(values_12bit) // width
-        return values_12bit.astype(np.uint16).reshape(height, width)
+        height = len(values_16bit) // width
+        return values_16bit.astype(np.uint16).reshape(height, width)
 
     def processing_done(self):
         """处理完成后的清理"""

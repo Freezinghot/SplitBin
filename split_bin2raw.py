@@ -48,7 +48,7 @@ def mss_split_bin2raw(mss_binname, output_dir):
 def pan_bin2raw(pan_filename, output_dir):
     basename = os.path.basename(pan_filename)
     export_filename = os.path.join(output_dir, 'P_' + basename.replace('bin', 'tif'))
-    with open(mss_binname, 'rb') as bf:
+    with open(pan_filename, 'rb') as bf:
         bf_data = bf.read()
     n = 17392       # (8568+128) * 2
     pf_split = [bf_data[i:i+n] for i in range(0, len(bf_data), n)]
@@ -122,6 +122,6 @@ def batch_extract(input_folder, export_dir):
 
 
 if __name__ == "__main__":
-    input_folder = r'E:\RSDATA\0723测试\A\B'
-    output_dir = r'E:\RSDATA\0723测试\split_raw'
+    input_folder = r'E:\RSDATA\亮度数据'
+    output_dir = r'E:\RSDATA\亮度数据'
     batch_extract(input_folder, output_dir)
