@@ -23,35 +23,128 @@ def read_means_from_csv(file_path):
 
 
 def calculate_multi_point_coeffs_from_means(dark_mean, light_means_list, L_values):
-    all_means = np.vstack([dark_mean] + light_means_list)
-    L = np.asarray(L_values, dtype=np.float64)
-    L_mean = np.mean(L)
+    """
+    计算多点相对辐射定标的增益和偏置系数，同时返回每个像元的拟合参数。
 
-    L_centered = L - L_mean
+    参数：
+        dark_mean: np.array, 暗场（L=0）下的像元均值，形状 (N,)，N为像元数。
+        light_means_list: list of np.array，每个元素是某个非零辐射亮度下的像元均值，形状均为 (N,)。
+        L_values: list of float，包含暗场对应的0以及所有亮场对应的辐射亮度值，
+                  长度应为 1 + len(light_means_list)。
+
+    返回：
+        G: np.array, 增益系数 (N,)
+        O: np.array, 偏置系数 (N,)
+        a: np.array, 每个像元线性拟合的斜率 (N,)
+        b: np.array, 每个像元线性拟合的截距 (N,)
+    """
+    # 将所有亮场和暗场的均值按行堆叠，形成矩阵 (M+1, N)，M为亮场数量
+    all_means = np.vstack([dark_mean] + light_means_list)
+
+    # 将光强值转为浮点并计算均值（用于中心化，提高数值稳定性）
+    L = np.asarray(L_values, dtype=np.float64)
+    L_mean = np.mean(L)         # 亮度均值，用于中心化
+    L_centered = L - L_mean     # 对亮度进行中心化处理
+
+    # 对所有像元的均值进行中心化（按列减去各自的均值）
     mean_centered = all_means - np.mean(all_means, axis=0)
 
+    # 计算每个像元的线性回归斜率 a
+    # numerator: 亮度中心化值与均值中心化值的协方差分子 (N,)
     numerator = np.sum(L_centered[:, np.newaxis] * mean_centered, axis=0)
+    # denominator: 亮度中心化值的平方和（标量）
     denominator = np.sum(L_centered ** 2)
-    a = numerator / denominator
+    a = numerator / denominator   # 斜率，形状 (N,)
 
-    mean_y = np.mean(all_means, axis=0)
-    b = mean_y - a * L_mean
+    # 计算每个像元的截距 b
+    mean_y = np.mean(all_means, axis=0)   # 各像元在所有亮度下的平均响应
+    b = mean_y - a * L_mean               # 截距
 
+    # 筛选出斜率有效的像元（防止除零）
     valid = a > 1e-9
     if not np.any(valid):
         raise ValueError("All pixel slopes are near zero, cannot compute reference line.")
 
+    # 计算参考直线的斜率和截距（取有效斜率和截距的均值）
     A_ref = np.mean(a[valid])
     B_ref = np.mean(b[valid])
 
+    # 初始化增益和偏置数组
     G = np.ones_like(a)
     O = np.zeros_like(b)
+    # 对于有效像元，计算增益和偏置，使得校正后响应都映射到参考直线
     G[valid] = A_ref / a[valid]
     O[valid] = B_ref - G[valid] * b[valid]
+    # 无效像元直接赋予参考截距作为偏置，增益保持1
     O[~valid] = B_ref
 
     return G, O, a, b
 
+
+def calculate_coeffs_with_dark_subtraction(dark_mean, light_means_list, L_values):
+    """
+    基于“先扣暗场再线性拟合”的定标系数计算。
+
+    参数：
+        dark_mean : np.array, 暗场像元均值，形状 (N,)
+        light_means_list : list of np.array，每个元素为某辐射亮度下的像元均值 (N,)
+        L_values : list of float，辐射亮度列表，长度应为 1 + len(light_means_list)，
+                   其中第一个值为0（对应暗场）
+    返回：
+        G : np.array, 增益系数 (N,)
+        O : np.array, 偏置系数 (N,)
+        k : np.array, 扣除暗场后的拟合斜率 (N,)
+        c : np.array, 扣除暗场后的拟合截距 (N,)
+    """
+    # 1. 构造扣除暗场后的数据矩阵
+    light_arrs = [np.asarray(m) for m in light_means_list]
+    N = len(dark_mean)
+
+    # 将暗场作为第一行（虽然其扣除后为0，但为了拟合完整性，仍计算）
+    all_raw = np.vstack([dark_mean] + light_arrs)  # (M+1, N)
+    # 每个像元减去自己的暗场值
+    all_sub = all_raw - dark_mean[np.newaxis, :]  # 广播相减
+
+    # 亮度数组（浮点数）
+    L = np.asarray(L_values, dtype=np.float64)
+    L_mean = np.mean(L)
+
+    # 2. 对扣除暗场后的值进行线性拟合（Δy = k·L + c）
+    L_centered = L - L_mean
+    # 中心化扣除暗场后的数据
+    sub_centered = all_sub - np.mean(all_sub, axis=0)
+
+    # 斜率 k (N,)
+    numerator = np.sum(L_centered[:, np.newaxis] * sub_centered, axis=0)
+    denominator = np.sum(L_centered ** 2)
+    k = numerator / denominator
+
+    # 截距 c (N,)
+    mean_sub = np.mean(all_sub, axis=0)
+    c = mean_sub - k * L_mean
+
+    # 3. 筛选有效斜率（避免除零）
+    valid = k > 1e-9
+    if not np.any(valid):
+        raise ValueError("All pixel slopes after dark subtraction are near zero.")
+
+    # 4. 定义参考直线（取有效像元斜率和截距的平均值）
+    A_ref = np.mean(k[valid])
+    B_ref = np.mean(c[valid])
+
+    # 5. 计算每个像元的增益 G 和偏置 O
+    #    校正目标：G·(Δy) + O = A_ref·L + B_ref
+    #    由于 Δy ≈ k·L + c，代入得 G·k = A_ref,  G·c + O = B_ref
+    G = np.ones_like(k)
+    O = np.zeros_like(c)
+
+    G[valid] = A_ref / k[valid]
+    O[valid] = B_ref - G[valid] * c[valid]
+
+    # 无效像元：斜率极小，无法校正，直接令 O = B_ref，G = 1
+    O[~valid] = B_ref
+
+    return G, O, k, c
 
 def calc_fit_r2(all_means, L_vals, a, b):
     N = all_means.shape[1]
@@ -393,7 +486,8 @@ class RadiometricCalibrationApp:
 
         # 计算
         try:
-            G, O, a, b = calculate_multi_point_coeffs_from_means(dark_mean, light_means, L_vals)
+            # G, O, a, b = calculate_multi_point_coeffs_from_means(dark_mean, light_means, L_vals)
+            G, O, a, b = calculate_coeffs_with_dark_subtraction(dark_mean, light_means, L_vals)
         except Exception as e:
             messagebox.showerror("Calculation failed", f"Error: {e}")
             return
@@ -411,6 +505,8 @@ class RadiometricCalibrationApp:
         self.L_arr = L_arr
 
         self.btn_save.config(state=tk.NORMAL)
+
+        self.all_sub = all_means - dark_mean[np.newaxis, :]
 
         # 更新统计信息
         stats = (
@@ -455,7 +551,7 @@ class RadiometricCalibrationApp:
         self.ax.clear()
 
         i = pix_idx
-        y_real = self.all_means[:, i]
+        y_real = self.all_sub[:, i] # self.all_means[:, i]
         x_vals = self.L_arr
         y_fit = self.fit_a[i] * x_vals + self.fit_b[i]
 
