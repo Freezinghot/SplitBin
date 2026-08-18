@@ -26,7 +26,7 @@ def tif2raw_batch(input_dir, output_dir):
 
 
 if __name__ == "__main__":
-    input_dir = r'F:\辐射定标20260723\信噪比\B_CMOS\P\暗\tif'
-    output_dir = r'F:\辐射定标20260723\信噪比\信噪比raw\CMOSB\P\暗'
-    label = 'P'
+    input_dir = r'F:\辐射定标20260723\均匀性\B_CMOS\暗场\P\增益2\TDI256\tif'
+    output_dir = r'F:\辐射定标20260723\均匀性\B_CMOS\暗场\P\增益2\TDI256\tif'
+    label = 'P_00000000_0000000000BDDE52_w8696_h4000_pMono12'
     tif2raw_batch(input_dir, output_dir)

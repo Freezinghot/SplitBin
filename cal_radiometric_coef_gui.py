@@ -81,7 +81,7 @@ def calculate_multi_point_coeffs_from_means(dark_mean, light_means_list, L_value
     return G, O, a, b
 
 
-def calculate_coeffs_with_dark_subtraction(dark_mean, light_means_list, L_values):
+def calculate_coeffs_with_dark_subtraction(dark_mean, light_means_list, L_values, saturation_threshold=4000, max_resid_std=3.0):
     """
     基于“先扣暗场再线性拟合”的定标系数计算。
 
@@ -96,32 +96,68 @@ def calculate_coeffs_with_dark_subtraction(dark_mean, light_means_list, L_values
         k : np.array, 扣除暗场后的拟合斜率 (N,)
         c : np.array, 扣除暗场后的拟合截距 (N,)
     """
+    dark_mean = np.asarray(dark_mean, dtype=np.float64)
+    light_means_list = [np.asarray(m, dtype=np.float64) for m in light_means_list]
+    L_values = np.asarray(L_values, dtype=np.float64)  # 关键：转成 numpy 数组
     # 1. 构造扣除暗场后的数据矩阵
     light_arrs = [np.asarray(m) for m in light_means_list]
     N = len(dark_mean)
 
     # 将暗场作为第一行（虽然其扣除后为0，但为了拟合完整性，仍计算）
-    all_raw = np.vstack([dark_mean] + light_arrs)  # (M+1, N)
+    all_raw = np.asarray(light_arrs)# np.vstack([dark_mean] + light_arrs)  # (M+1, N)
     # 每个像元减去自己的暗场值
     all_sub = all_raw - dark_mean[np.newaxis, :]  # 广播相减
 
-    # 亮度数组（浮点数）
-    L = np.asarray(L_values, dtype=np.float64)
-    L_mean = np.mean(L)
+    # 对每一列进行迭代剔除异常点
+    N = dark_mean.shape[0]
+    k = np.zeros(N)
+    c = np.zeros(N)
+    valid = np.ones(N, dtype=bool)
 
-    # 2. 对扣除暗场后的值进行线性拟合（Δy = k·L + c）
-    L_centered = L - L_mean
-    # 中心化扣除暗场后的数据
-    sub_centered = all_sub - np.mean(all_sub, axis=0)
+    for i in range(N):
+        y = all_sub[:, i]
+        L = L_values[1:]        # 不加入暗场0
+        # 剔除饱和点（检查原始亮度数据）
+        raw = all_raw[:, i]  # 需要传入 raw 或重新构造
+        mask = raw < saturation_threshold
+        L_clean = L[mask]
+        y_clean = y[mask]
+        if len(L_clean) < 2:
+            valid[i] = False
+            continue
+        # 初步拟合
+        p = np.polyfit(L_clean, y_clean, 1)
+        resid = y_clean - np.polyval(p, L_clean)
+        std = np.std(resid)
+        # 剔除残差过大的点
+        mask2 = np.abs(resid) < max_resid_std * std
+        L_final = L_clean[mask2]
+        y_final = y_clean[mask2]
+        if len(L_final) < 2:
+            valid[i] = False
+            continue
+        # 再次拟合
+        p = np.polyfit(L_final, y_final, 1)
+        k[i] = p[0]
+        c[i] = p[1]
 
-    # 斜率 k (N,)
-    numerator = np.sum(L_centered[:, np.newaxis] * sub_centered, axis=0)
-    denominator = np.sum(L_centered ** 2)
-    k = numerator / denominator
-
-    # 截距 c (N,)
-    mean_sub = np.mean(all_sub, axis=0)
-    c = mean_sub - k * L_mean
+    # # 亮度数组（浮点数）
+    # L = np.asarray(L_values, dtype=np.float64)
+    # L_mean = np.mean(L)
+    #
+    # # 2. 对扣除暗场后的值进行线性拟合（Δy = k·L + c）
+    # L_centered = L - L_mean
+    # # 中心化扣除暗场后的数据
+    # sub_centered = all_sub - np.mean(all_sub, axis=0)
+    #
+    # # 斜率 k (N,)
+    # numerator = np.sum(L_centered[:, np.newaxis] * sub_centered, axis=0)
+    # denominator = np.sum(L_centered ** 2)
+    # k = numerator / denominator
+    #
+    # # 截距 c (N,)
+    # mean_sub = np.mean(all_sub, axis=0)
+    # c = mean_sub - k * L_mean
 
     # 3. 筛选有效斜率（避免除零）
     valid = k > 1e-9
@@ -144,7 +180,10 @@ def calculate_coeffs_with_dark_subtraction(dark_mean, light_means_list, L_values
     # 无效像元：斜率极小，无法校正，直接令 O = B_ref，G = 1
     O[~valid] = B_ref
 
-    return G, O, k, c
+    # 将offset减去暗场
+    O_new = O - G * dark_mean
+
+    return G, O_new, k, c
 
 def calc_fit_r2(all_means, L_vals, a, b):
     N = all_means.shape[1]
@@ -159,6 +198,49 @@ def calc_fit_r2(all_means, L_vals, a, b):
         else:
             r2[i] = 1 - ss_res / ss_tot
     return r2
+
+
+def calculate_coeffs_with_dark_subtraction_v2(dark_mean, light_means_list, L_values,
+                                              saturation_threshold=4000):
+    light_arrs = [np.asarray(m) for m in light_means_list]
+    N = len(dark_mean)
+    all_raw = np.vstack([dark_mean] + light_arrs)   # (M+1, N)
+    all_sub = all_raw - dark_mean[np.newaxis, :]
+    L = np.asarray(L_values, dtype=np.float64)
+
+    k = np.zeros(N)
+    c = np.zeros(N)
+    valid = np.ones(N, dtype=bool)
+
+    for i in range(N):
+        y = all_sub[:, i]
+        raw = all_raw[:, i]
+        # 剔除饱和点
+        mask = raw < saturation_threshold
+        if np.sum(mask) < 2:
+            valid[i] = False
+            continue
+        L_clean = L[mask]
+        y_clean = y[mask]
+        # 可选加权：权重设为 1/(y_clean+1)
+        w = 1.0 / np.sqrt(y_clean + 1)
+        # 拟合一次
+        p = np.polyfit(L_clean, y_clean, 1, w=w)
+        k[i] = p[0]
+        c[i] = p[1]
+
+    # 筛选有效斜率
+    valid = valid & (k > 1e-9)
+    if not np.any(valid):
+        raise ValueError("No valid pixels found.")
+
+    A_ref = np.median(k[valid])   # 使用中位数更稳健
+    B_ref = np.median(c[valid])
+    G = np.ones(N); O = np.zeros(N)
+    G[valid] = A_ref / k[valid]
+    O[valid] = B_ref - G[valid] * c[valid]
+    O[~valid] = B_ref
+    return G, O, k, c
 
 
 # ======================== 应用程序类 ========================
@@ -493,8 +575,9 @@ class RadiometricCalibrationApp:
             return
 
         all_means = np.vstack([dark_mean] + light_means)
+        all_sub = all_means - dark_mean[np.newaxis, :]
         L_arr = np.array(L_vals)
-        r2 = calc_fit_r2(all_means, L_arr, a, b)
+        r2 = calc_fit_r2(all_sub, L_arr, a, b)
 
         self.G = G
         self.O = O

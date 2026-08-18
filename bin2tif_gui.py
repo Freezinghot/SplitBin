@@ -492,13 +492,6 @@ class Bin2TifApp:
 
         values_16bit = np.frombuffer(data_bytes, dtype=dtype)
 
-        # if mode == 'low':
-        #     values_12bit = values_16bit & 0xFFF
-        # elif mode == 'shift':
-        #     values_12bit = values_16bit >> 4
-        # else:
-        #     raise ValueError("mode必须是 'low' 或 'shift'")
-
         height = len(values_16bit) // width
         return values_16bit.astype(np.uint16).reshape(height, width)
 
