@@ -1,4 +1,10 @@
+# --*-- conding:utf-8 --*--
+# @File  : radiometric_calibration_gui.py
+# @Author: FH
+# @Date  : 2026/8/18
+# @Desc  :
 import os
+import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import numpy as np
@@ -38,44 +44,32 @@ def calculate_multi_point_coeffs_from_means(dark_mean, light_means_list, L_value
         a: np.array, 每个像元线性拟合的斜率 (N,)
         b: np.array, 每个像元线性拟合的截距 (N,)
     """
-    # 将所有亮场和暗场的均值按行堆叠，形成矩阵 (M+1, N)，M为亮场数量
     all_means = np.vstack([dark_mean] + light_means_list)
 
-    # 将光强值转为浮点并计算均值（用于中心化，提高数值稳定性）
     L = np.asarray(L_values, dtype=np.float64)
-    L_mean = np.mean(L)         # 亮度均值，用于中心化
-    L_centered = L - L_mean     # 对亮度进行中心化处理
+    L_mean = np.mean(L)
+    L_centered = L - L_mean
 
-    # 对所有像元的均值进行中心化（按列减去各自的均值）
     mean_centered = all_means - np.mean(all_means, axis=0)
 
-    # 计算每个像元的线性回归斜率 a
-    # numerator: 亮度中心化值与均值中心化值的协方差分子 (N,)
     numerator = np.sum(L_centered[:, np.newaxis] * mean_centered, axis=0)
-    # denominator: 亮度中心化值的平方和（标量）
     denominator = np.sum(L_centered ** 2)
-    a = numerator / denominator   # 斜率，形状 (N,)
+    a = numerator / denominator
 
-    # 计算每个像元的截距 b
-    mean_y = np.mean(all_means, axis=0)   # 各像元在所有亮度下的平均响应
-    b = mean_y - a * L_mean               # 截距
+    mean_y = np.mean(all_means, axis=0)
+    b = mean_y - a * L_mean
 
-    # 筛选出斜率有效的像元（防止除零）
     valid = a > 1e-9
     if not np.any(valid):
         raise ValueError("All pixel slopes are near zero, cannot compute reference line.")
 
-    # 计算参考直线的斜率和截距（取有效斜率和截距的均值）
     A_ref = np.mean(a[valid])
     B_ref = np.mean(b[valid])
 
-    # 初始化增益和偏置数组
     G = np.ones_like(a)
     O = np.zeros_like(b)
-    # 对于有效像元，计算增益和偏置，使得校正后响应都映射到参考直线
     G[valid] = A_ref / a[valid]
     O[valid] = B_ref - G[valid] * b[valid]
-    # 无效像元直接赋予参考截距作为偏置，增益保持1
     O[~valid] = B_ref
 
     return G, O, a, b
@@ -84,31 +78,16 @@ def calculate_multi_point_coeffs_from_means(dark_mean, light_means_list, L_value
 def calculate_coeffs_with_dark_subtraction(dark_mean, light_means_list, L_values, saturation_threshold=4000, max_resid_std=3.0):
     """
     基于“先扣暗场再线性拟合”的定标系数计算。
-
-    参数：
-        dark_mean : np.array, 暗场像元均值，形状 (N,)
-        light_means_list : list of np.array，每个元素为某辐射亮度下的像元均值 (N,)
-        L_values : list of float，辐射亮度列表，长度应为 1 + len(light_means_list)，
-                   其中第一个值为0（对应暗场）
-    返回：
-        G : np.array, 增益系数 (N,)
-        O : np.array, 偏置系数 (N,)
-        k : np.array, 扣除暗场后的拟合斜率 (N,)
-        c : np.array, 扣除暗场后的拟合截距 (N,)
     """
     dark_mean = np.asarray(dark_mean, dtype=np.float64)
     light_means_list = [np.asarray(m, dtype=np.float64) for m in light_means_list]
-    L_values = np.asarray(L_values, dtype=np.float64)  # 关键：转成 numpy 数组
-    # 1. 构造扣除暗场后的数据矩阵
+    L_values = np.asarray(L_values, dtype=np.float64)
     light_arrs = [np.asarray(m) for m in light_means_list]
     N = len(dark_mean)
 
-    # 将暗场作为第一行（虽然其扣除后为0，但为了拟合完整性，仍计算）
-    all_raw = np.asarray(light_arrs)# np.vstack([dark_mean] + light_arrs)  # (M+1, N)
-    # 每个像元减去自己的暗场值
-    all_sub = all_raw - dark_mean[np.newaxis, :]  # 广播相减
+    all_raw = np.asarray(light_arrs)
+    all_sub = all_raw - dark_mean[np.newaxis, :]
 
-    # 对每一列进行迭代剔除异常点
     N = dark_mean.shape[0]
     k = np.zeros(N)
     c = np.zeros(N)
@@ -116,56 +95,46 @@ def calculate_coeffs_with_dark_subtraction(dark_mean, light_means_list, L_values
 
     for i in range(N):
         y = all_sub[:, i]
-        L = L_values[1:]        # 不加入暗场0
-        # 剔除饱和点（检查原始亮度数据）
-        raw = all_raw[:, i]  # 需要传入 raw 或重新构造
+        L = L_values[1:]
+        raw = all_raw[:, i]
         mask = raw < saturation_threshold
         L_clean = L[mask]
         y_clean = y[mask]
         if len(L_clean) < 2:
             valid[i] = False
             continue
-        # 初步拟合
         p = np.polyfit(L_clean, y_clean, 1)
         resid = y_clean - np.polyval(p, L_clean)
         std = np.std(resid)
-        # 剔除残差过大的点
         mask2 = np.abs(resid) < max_resid_std * std
         L_final = L_clean[mask2]
         y_final = y_clean[mask2]
         if len(L_final) < 2:
             valid[i] = False
             continue
-        # 再次拟合
         p = np.polyfit(L_final, y_final, 1)
         k[i] = p[0]
         c[i] = p[1]
 
-    # 3. 筛选有效斜率（避免除零）
     valid = k > 1e-9
     if not np.any(valid):
         raise ValueError("All pixel slopes after dark subtraction are near zero.")
 
-    # 4. 定义参考直线（取有效像元斜率和截距的平均值）
     A_ref = np.mean(k[valid])
     B_ref = np.mean(c[valid])
 
-    # 5. 计算每个像元的增益 G 和偏置 O
-    #    校正目标：G·(Δy) + O = A_ref·L + B_ref
-    #    由于 Δy ≈ k·L + c，代入得 G·k = A_ref,  G·c + O = B_ref
     G = np.ones_like(k)
     O = np.zeros_like(c)
 
     G[valid] = A_ref / k[valid]
     O[valid] = B_ref - G[valid] * c[valid]
 
-    # 无效像元：斜率极小，无法校正，直接令 O = B_ref，G = 1
     O[~valid] = B_ref
 
-    # 将offset减去暗场
     O_new = O - G * dark_mean
 
     return G, O_new, k, c
+
 
 def calc_fit_r2(all_means, L_vals, a, b):
     N = all_means.shape[1]
@@ -186,7 +155,7 @@ def calculate_coeffs_with_dark_subtraction_v2(dark_mean, light_means_list, L_val
                                               saturation_threshold=4000):
     light_arrs = [np.asarray(m) for m in light_means_list]
     N = len(dark_mean)
-    all_raw = np.vstack([dark_mean] + light_arrs)   # (M+1, N)
+    all_raw = np.vstack([dark_mean] + light_arrs)
     all_sub = all_raw - dark_mean[np.newaxis, :]
     L = np.asarray(L_values, dtype=np.float64)
 
@@ -197,26 +166,22 @@ def calculate_coeffs_with_dark_subtraction_v2(dark_mean, light_means_list, L_val
     for i in range(N):
         y = all_sub[:, i]
         raw = all_raw[:, i]
-        # 剔除饱和点
         mask = raw < saturation_threshold
         if np.sum(mask) < 2:
             valid[i] = False
             continue
         L_clean = L[mask]
         y_clean = y[mask]
-        # 可选加权：权重设为 1/(y_clean+1)
         w = 1.0 / np.sqrt(y_clean + 1)
-        # 拟合一次
         p = np.polyfit(L_clean, y_clean, 1, w=w)
         k[i] = p[0]
         c[i] = p[1]
 
-    # 筛选有效斜率
     valid = valid & (k > 1e-9)
     if not np.any(valid):
         raise ValueError("No valid pixels found.")
 
-    A_ref = np.median(k[valid])   # 使用中位数更稳健
+    A_ref = np.median(k[valid])
     B_ref = np.median(c[valid])
     G = np.ones(N); O = np.zeros(N)
     G[valid] = A_ref / k[valid]
@@ -246,6 +211,9 @@ class RadiometricCalibrationApp:
         self.all_means = None
         self.L_arr = None
 
+        # 亮度预设映射 { "亮度1": 108.1, "亮度2": 200.5, ... }
+        self.brightness_map = {}
+
         # matplotlib 画布
         self.canvas = None
         self.ax = None
@@ -258,7 +226,6 @@ class RadiometricCalibrationApp:
     # 界面构建（左右分栏）
     # ------------------------------------------------------------------
     def create_widgets(self):
-        # 主面板：左侧文件管理，右侧拟合显示
         main_pw = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_pw.pack(fill=tk.BOTH, expand=True)
 
@@ -291,6 +258,7 @@ class RadiometricCalibrationApp:
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Button(btn_frame, text="Add Files", command=self.add_files).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Brightness Map", command=self.edit_brightness_map).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Remove Selected", command=self.remove_files).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Edit Radiance", command=self.edit_selected_radiance).pack(side=tk.LEFT, padx=5)
 
@@ -314,12 +282,10 @@ class RadiometricCalibrationApp:
         right_frame = ttk.Frame(main_pw)
         main_pw.add(right_frame, weight=1)
 
-        # 统计信息标签
         self.stats_text = tk.StringVar(value="Fit accuracy will be shown here after calculation.")
         ttk.Label(right_frame, textvariable=self.stats_text, font=("TkDefaultFont", 10, "bold"),
                   padding=10).pack(anchor=tk.W)
 
-        # 像元选择区域
         pixel_frame = ttk.Frame(right_frame)
         pixel_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -330,7 +296,6 @@ class RadiometricCalibrationApp:
         self.pixel_entry.bind("<Return>", lambda e: self.update_plot())
         ttk.Button(pixel_frame, text="Plot", command=self.update_plot).pack(side=tk.LEFT, padx=5)
 
-        # 拟合曲线画布容器
         self.plot_frame = ttk.Frame(right_frame)
         self.plot_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
@@ -477,8 +442,27 @@ class RadiometricCalibrationApp:
         for f in filenames:
             if any(rec['path'] == f for rec in self.file_records):
                 continue
-            item_id = self.tree.insert("", tk.END, values=(f, "0.0000"))
-            self.file_records.append({'path': f, 'L': 0.0, 'item_id': item_id})
+
+            # 自动匹配亮度值
+            key = self._extract_brightness_key(f)
+            if key == '暗场':
+                L = 0.0  # 暗场固定为0
+                auto_note = "暗场→0"
+            elif key and key in self.brightness_map:
+                L = self.brightness_map[key]
+                auto_note = f"{key}→{L}"
+            else:
+                L = 0.0
+                auto_note = "未识别，需手动编辑"
+
+            item_id = self.tree.insert("", tk.END, values=(f, f"{L:.4f}"))
+            self.file_records.append({'path': f, 'L': L, 'item_id': item_id})
+
+            if auto_note != "暗场→0" and auto_note.startswith("未识别"):
+                self.status_var.set(f"Added {len(filenames)} file(s), some could not be auto-matched. Please edit Radiance manually or set Brightness Map.")
+            else:
+                self.status_var.set(f"Added {len(filenames)} file(s)")
+
         if filenames:
             self.status_var.set(f"Added {len(filenames)} file(s)")
         else:
@@ -495,6 +479,94 @@ class RadiometricCalibrationApp:
             self.tree.delete(item)
             self.file_records = [rec for rec in self.file_records if rec['item_id'] != item]
         self.status_var.set(f"Removed {len(selected)} file(s)")
+
+    # ------------------------------------------------------------------
+    # 亮度映射设置
+    # ------------------------------------------------------------------
+    def edit_brightness_map(self):
+        """打开亮度映射编辑对话框"""
+        win = tk.Toplevel(self.root)
+        win.title("Brightness Map Settings")
+        win.geometry("400x500")
+        win.transient(self.root)
+        win.grab_set()
+
+        ttk.Label(win, text="每行输入一个亮度等级，格式：亮度n=数值\n例如：亮度1=108.1\n最多20个，暗场自动识别为0，无需设置。").pack(pady=5)
+
+        text = tk.Text(win, height=20, width=40)
+        text.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
+
+        # 预填当前映射
+        for key, val in self.brightness_map.items():
+            text.insert(tk.END, f"{key}={val}\n")
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(pady=10)
+
+        def save_mapping():
+            content = text.get("1.0", tk.END).strip()
+            lines = content.splitlines()
+            new_map = {}
+            error = None
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                if '=' not in line:
+                    error = f"无效行: {line}"
+                    break
+                key, val_str = line.split('=', 1)
+                key = key.strip()
+                val_str = val_str.strip()
+                if not key.startswith('亮度') or not key[2:].isdigit():
+                    error = f"键格式错误: {key} (应为 亮度n)"
+                    break
+                try:
+                    val = float(val_str)
+                except ValueError:
+                    error = f"数值无效: {val_str}"
+                    break
+                new_map[key] = val
+
+            if error:
+                messagebox.showerror("Error", error, parent=win)
+                return
+
+            if len(new_map) > 20:
+                messagebox.showerror("Error", "最多支持20个亮度等级（不含暗场）", parent=win)
+                return
+
+            self.brightness_map = new_map
+            self.status_var.set(f"Brightness map updated with {len(new_map)} entries.")
+            self._auto_match_all_files()
+            win.destroy()
+
+        ttk.Button(btn_frame, text="Save", command=save_mapping).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side=tk.LEFT, padx=5)
+
+    def _extract_brightness_key(self, filepath):
+        """从文件名提取亮度标识，返回 '暗场' 或 '亮度n'，未找到返回 None"""
+        basename = os.path.splitext(os.path.basename(filepath))[0]
+        if '暗场' in basename:
+            return '暗场'
+        match = re.search(r'亮度(\d+)', basename)
+        if match:
+            return f'亮度{match.group(1)}'
+        return None
+
+    def _auto_match_all_files(self):
+        """根据当前映射重新匹配所有已添加文件的 Radiance"""
+        for rec in self.file_records:
+            key = self._extract_brightness_key(rec['path'])
+            if key == '暗场':
+                new_L = 0.0
+            elif key and key in self.brightness_map:
+                new_L = self.brightness_map[key]
+            else:
+                # 保持原值，若原本是0可能仍需手动编辑，这里不改动
+                continue
+            rec['L'] = new_L
+            self.tree.set(rec['item_id'], "Radiance", f"{new_L:.4f}")
 
     # ------------------------------------------------------------------
     # 计算定标系数
@@ -523,7 +595,6 @@ class RadiometricCalibrationApp:
             messagebox.showerror("Insufficient radiance values", "At least two distinct radiance values (including 0) are needed.")
             return
 
-        # 读取数据
         try:
             dark_mean = np.array(read_means_from_csv(dark_rec['path']))
         except Exception as e:
@@ -548,7 +619,6 @@ class RadiometricCalibrationApp:
                     f"Dark pixel count ({N}) differs from light file\n{light_recs[i]['path']}\n({len(arr)}).")
                 return
 
-        # 计算
         try:
             # G, O, a, b = calculate_multi_point_coeffs_from_means(dark_mean, light_means, L_vals)
             G, O, a, b = calculate_coeffs_with_dark_subtraction(dark_mean, light_means, L_vals)
@@ -573,7 +643,6 @@ class RadiometricCalibrationApp:
 
         self.all_sub = all_means - dark_mean[np.newaxis, :]
 
-        # 更新统计信息
         stats = (
             f"Calibration completed.\n"
             f"Pixels: {N}\n"
@@ -583,7 +652,6 @@ class RadiometricCalibrationApp:
         )
         self.stats_text.set(stats)
 
-        # 自动绘制像元0
         self.update_plot(default_idx=0)
 
     # ------------------------------------------------------------------
@@ -595,7 +663,6 @@ class RadiometricCalibrationApp:
                 messagebox.showinfo("No plot", "Calculation data is not available.")
             return
 
-        # 获取用户输入的像元索引
         if default_idx is not None:
             idx_str = str(default_idx)
             self.pixel_entry.delete(0, tk.END)
@@ -612,11 +679,10 @@ class RadiometricCalibrationApp:
             messagebox.showerror("Index out of range", f"Pixel index must be between 0 and {len(self.fit_a)-1}.")
             return
 
-        # 清除旧图
         self.ax.clear()
 
         i = pix_idx
-        y_real = self.all_sub[:, i] # self.all_means[:, i]
+        y_real = self.all_sub[:, i]
         x_vals = self.L_arr
         y_fit = self.fit_a[i] * x_vals + self.fit_b[i]
 
