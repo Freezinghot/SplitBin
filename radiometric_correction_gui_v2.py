@@ -1,3 +1,8 @@
+# --*-- conding:utf-8 --*--
+# @File  : radiometric_correction_gui_v2.py
+# @Author: FH
+# @Date  : 2026/10/9
+# @Desc  :
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import numpy as np
@@ -16,7 +21,7 @@ def imread(path):
     except ImportError:
         img = np.array(Image.open(path))
     if img.ndim == 3:
-        img = img[:,:,0]  # 多光谱取第一通道
+        img = img[:, :, 0]
     return img.astype(np.float64)
 
 def imwrite(path, data):
@@ -38,8 +43,41 @@ def load_coefficients(coeff_file):
 def apply_correction(image, G, O):
     return G * image + O
 
+# ===== 新增：条纹系数（逐列） =====
+def compute_streaking_metric(col_mean):
+    """
+    条纹系数定义：|μ_i - (μ_{i-1}+μ_{i+1})/2| / ((μ_{i-1}+μ_{i+1})/2) * 100%
+    边界列退化为与相邻单列比较。
+    返回与 col_mean 等长的一维数组。
+    """
+    n = len(col_mean)
+    s = np.zeros(n, dtype=np.float64)
+    if n < 2:
+        return s
+    if n >= 3:
+        ref = (col_mean[:-2] + col_mean[2:]) / 2.0
+        valid = ref != 0
+        tmp = np.zeros(len(ref), dtype=np.float64)
+        tmp[valid] = np.abs(col_mean[1:-1][valid] - ref[valid]) / ref[valid] * 100.0
+        s[1:-1] = tmp
+    # if col_mean[1] != 0:
+        # s[0] = abs(col_mean[0] - col_mean[1]) / col_mean[1] * 100.0
+    s[0] = 0
+    # if col_mean[-2] != 0:
+        # s[-1] = abs(col_mean[-1] - col_mean[-2]) / col_mean[-2] * 100.0
+    s[-1] = 0
+    return s
+
+# ===== 新增：列均值均方根 RMS（归一化，单值） =====
+def compute_column_rms(col_mean):
+    m = np.mean(col_mean)
+    n = len(col_mean)
+    if m == 0 or n < 2:
+        return 0.0
+    return np.sqrt(np.sum((col_mean - m) ** 2) / (n - 1)) / m * 100.0
+
 def evaluate_uniformity(img_raw, img_corr):
-    # 1. 原有按列统计（保留，用于条带强度等）
+    # 1. 原有按列统计
     col_mean_raw = np.mean(img_raw, axis=0)
     col_mean_corr = np.mean(img_corr, axis=0)
     col_std_raw = np.std(img_raw, axis=0, ddof=1)
@@ -56,13 +94,12 @@ def evaluate_uniformity(img_raw, img_corr):
     cv_raw = global_std_raw / global_mean_raw if global_mean_raw != 0 else np.nan
     cv_corr = global_std_corr / global_mean_corr if global_mean_corr != 0 else np.nan
 
-    # 2. 新增：逐行 CV（行标准差 / 行均值）
-    row_mean_raw = np.mean(img_raw, axis=1)   # 形状 (K,)
+    # 2. 逐行 CV
+    row_mean_raw = np.mean(img_raw, axis=1)
     row_mean_corr = np.mean(img_corr, axis=1)
     row_std_raw = np.std(img_raw, axis=1, ddof=1)
     row_std_corr = np.std(img_corr, axis=1, ddof=1)
 
-    # 防止均值接近0的行产生奇异值
     mask_raw = row_mean_raw > 1e-6
     mask_corr = row_mean_corr > 1e-6
     row_cv_raw = np.full_like(row_mean_raw, np.nan)
@@ -70,12 +107,20 @@ def evaluate_uniformity(img_raw, img_corr):
     row_cv_raw[mask_raw] = row_std_raw[mask_raw] / row_mean_raw[mask_raw]
     row_cv_corr[mask_corr] = row_std_corr[mask_corr] / row_mean_corr[mask_corr]
 
+    # ===== 新增：条纹系数（逐列） =====
+    streaking_metric_raw = compute_streaking_metric(col_mean_raw)
+    streaking_metric_corr = compute_streaking_metric(col_mean_corr)
+
+    # ===== 新增：列均值均方根 RMS =====
+    column_rms_raw = compute_column_rms(col_mean_raw)
+    column_rms_corr = compute_column_rms(col_mean_corr)
+
     metrics = {
         'global_mean_raw': global_mean_raw,
         'global_mean_corr': global_mean_corr,
         'global_std_raw': global_std_raw,
         'global_std_corr': global_std_corr,
-        'global_heterogeneity_corr': global_std_corr/global_mean_corr,       # 非均匀性
+        'global_heterogeneity_corr': global_std_corr / global_mean_corr,
         'streaking_raw': streaking_raw,
         'streaking_corr': streaking_corr,
         'cv_raw': cv_raw,
@@ -84,9 +129,13 @@ def evaluate_uniformity(img_raw, img_corr):
         'col_mean_corr': col_mean_corr,
         'col_std_raw': col_std_raw,
         'col_std_corr': col_std_corr,
-        # 逐行 CV 数据
         'row_cv_raw': row_cv_raw,
         'row_cv_corr': row_cv_corr,
+        # ===== 新增字段 =====
+        'streaking_metric_raw': streaking_metric_raw,
+        'streaking_metric_corr': streaking_metric_corr,
+        'column_rms_raw': column_rms_raw,
+        'column_rms_corr': column_rms_corr,
     }
     return metrics
 
@@ -95,7 +144,7 @@ class VerifierApp:
     def __init__(self, root):
         self.root = root
         self.root.title("辐射校正系数验证工具")
-        self.root.geometry("1000x850")
+        self.root.geometry("1000x900")
 
         self.image_path = tk.StringVar()
         self.coeff_path = tk.StringVar()
@@ -108,7 +157,6 @@ class VerifierApp:
         self.create_widgets()
 
     def create_widgets(self):
-        # 文件选择区
         frame_files = ttk.LabelFrame(self.root, text="输入文件", padding=10)
         frame_files.pack(fill=tk.X, padx=10, pady=5)
 
@@ -120,7 +168,6 @@ class VerifierApp:
         ttk.Entry(frame_files, textvariable=self.coeff_path, width=70).grid(row=1, column=1, padx=5, pady=2)
         ttk.Button(frame_files, text="浏览...", command=self.select_coeff).grid(row=1, column=2, padx=5, pady=2)
 
-        # 按钮
         frame_btn = ttk.Frame(self.root)
         frame_btn.pack(fill=tk.X, padx=10, pady=5)
 
@@ -132,29 +179,26 @@ class VerifierApp:
 
         ttk.Button(frame_btn, text="退出", command=self.root.destroy).pack(side=tk.RIGHT, padx=5)
 
-        # 主面板
         main_panel = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # 左侧文本指标
         frame_text = ttk.LabelFrame(main_panel, text="均匀性指标", padding=5)
         main_panel.add(frame_text, weight=1)
 
-        self.text_metrics = tk.Text(frame_text, wrap=tk.NONE, state=tk.DISABLED, height=22, width=42)
+        self.text_metrics = tk.Text(frame_text, wrap=tk.NONE, state=tk.DISABLED, height=26, width=48)
         scroll_y = ttk.Scrollbar(frame_text, command=self.text_metrics.yview)
         self.text_metrics.configure(yscrollcommand=scroll_y.set)
         self.text_metrics.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # 右侧图表（4个子图，最后一个改为逐行CV）
         frame_plot = ttk.LabelFrame(main_panel, text="分析图", padding=5)
         main_panel.add(frame_plot, weight=3)
 
-        self.fig, self.axes = plt.subplots(4, 1, figsize=(7, 9))
+        # ===== 修改：子图由 4 行改为 5 行 =====
+        self.fig, self.axes = plt.subplots(5, 1, figsize=(7, 12))
         self.canvas = FigureCanvasTkAgg(self.fig, master=frame_plot)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # 状态栏
         self.status_var = tk.StringVar(value="就绪")
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -219,7 +263,6 @@ class VerifierApp:
     def update_metrics_display(self):
         m = self.metrics
 
-        # 计算逐行 CV 的统计量
         rcv_raw = m['row_cv_raw']
         rcv_corr = m['row_cv_corr']
         mean_rcv_raw = np.nanmean(rcv_raw)
@@ -229,17 +272,36 @@ class VerifierApp:
         std_rcv_raw = np.nanstd(rcv_raw)
         std_rcv_corr = np.nanstd(rcv_corr)
 
+        # ===== 新增：条纹系数统计量 =====
+        sm_raw = m['streaking_metric_raw']
+        sm_corr = m['streaking_metric_corr']
+        mean_sm_raw = np.mean(sm_raw)
+        mean_sm_corr = np.mean(sm_corr)
+        max_sm_raw = np.max(sm_raw)
+        max_sm_corr = np.max(sm_corr)
+
         text = (
             f"原始图像全局均值: {m['global_mean_raw']:.4f}\n"
             f"校正图像全局均值: {m['global_mean_corr']:.4f}\n\n"
             f"原始图像全局标准差: {m['global_std_raw']:.4f}\n"
             f"校正图像全局标准差: {m['global_std_corr']:.4f}\n\n"
-            f"校正图像非均匀性: {m['global_mean_corr']:.4f}\n\n"            
+            # 修正：原来误用了 global_mean_corr，改用 heterogeneity
+            f"校正图像非均匀性: {m['global_heterogeneity_corr']:.6f}\n\n"
             f"原始图像列均值标准差 (条带强度): {m['streaking_raw']:.4f}\n"
             f"校正图像列均值标准差 (条带强度): {m['streaking_corr']:.4f}\n"
             f"条带强度降低百分比: {self.get_improvement():.2f}%\n\n"
             f"原始图像全局变异系数 (CV): {m['cv_raw']:.6f}\n"
             f"校正图像全局变异系数 (CV): {m['cv_corr']:.6f}\n\n"
+            # ===== 新增：列均值 RMS 数值 =====
+            f"--- 列均值均方根 (RMS) ---\n"
+            f"原始列均值RMS: {m['column_rms_raw']:.4f} %\n"
+            f"校正列均值RMS: {m['column_rms_corr']:.4f} %\n"
+            f"RMS 降低百分比: {self.get_rms_improvement():.2f}%\n\n"
+            # ===== 新增：条纹系数辅助信息 =====
+            f"--- 条纹系数 (Streaking Metric) ---\n"
+            f"原始 - 均值: {mean_sm_raw:.4f}%  最大: {max_sm_raw:.4f}%\n"
+            f"校正 - 均值: {mean_sm_corr:.4f}%  最大: {max_sm_corr:.4f}%\n"
+            f"(验收参考线: 0.25%)\n\n"
             f"--- 逐行 CV (行标准差/行均值) ---\n"
             f"原始 - 均值: {mean_rcv_raw:.6f}  中位数: {median_rcv_raw:.6f}  标准差: {std_rcv_raw:.6f}\n"
             f"校正 - 均值: {mean_rcv_corr:.6f}  中位数: {median_rcv_corr:.6f}  标准差: {std_rcv_corr:.6f}\n"
@@ -254,7 +316,15 @@ class VerifierApp:
         corr = self.metrics['streaking_corr']
         if raw == 0:
             return 0.0
-        return (1 - corr/raw) * 100
+        return (1 - corr / raw) * 100
+
+    # ===== 新增：RMS 降低百分比 =====
+    def get_rms_improvement(self):
+        raw = self.metrics['column_rms_raw']
+        corr = self.metrics['column_rms_corr']
+        if raw == 0:
+            return 0.0
+        return (1 - corr / raw) * 100
 
     def update_plot(self):
         for ax in self.axes:
@@ -293,7 +363,7 @@ class VerifierApp:
         self.axes[2].legend()
         self.axes[2].grid(True, alpha=0.3)
 
-        # 4. 逐行 CV 曲线（原“各像元CV”图改为逐行CV）
+        # 4. 逐行 CV
         self.axes[3].plot(x_row, m['row_cv_raw'], 'r-', alpha=0.7, linewidth=0.8, label='before')
         self.axes[3].plot(x_row, m['row_cv_corr'], 'b-', alpha=0.7, linewidth=0.8, label='after')
         self.axes[3].set_title('Row Coefficient of Variation')
@@ -301,6 +371,17 @@ class VerifierApp:
         self.axes[3].set_ylabel('CV')
         self.axes[3].legend()
         self.axes[3].grid(True, alpha=0.3)
+
+        # ===== 新增：5. 条纹系数曲线 =====
+        self.axes[4].plot(x_col, m['streaking_metric_raw'], 'r-', alpha=0.6, linewidth=0.8, label='before')
+        self.axes[4].plot(x_col, m['streaking_metric_corr'], 'b-', alpha=0.8, linewidth=0.8, label='after')
+        self.axes[4].axhline(0.25, color='green', linestyle='--', linewidth=1, label='0.25% threshold')
+        self.axes[4].set_title('Streaking Metric (Column-wise)')
+        self.axes[4].set_xlabel('col')
+        self.axes[4].set_ylabel('Streaking (%)')
+        self.axes[4].set_ylim(0, 1)  # 新增：纵轴上限固定为 1
+        self.axes[4].legend()
+        self.axes[4].grid(True, alpha=0.3)
 
         plt.tight_layout()
         self.canvas.draw()

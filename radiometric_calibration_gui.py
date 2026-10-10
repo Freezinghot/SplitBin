@@ -104,15 +104,16 @@ def calculate_coeffs_with_dark_subtraction(dark_mean, light_means_list, L_values
             valid[i] = False
             continue
         p = np.polyfit(L_clean, y_clean, 1)
-        resid = y_clean - np.polyval(p, L_clean)
-        std = np.std(resid)
-        mask2 = np.abs(resid) < max_resid_std * std
-        L_final = L_clean[mask2]
-        y_final = y_clean[mask2]
-        if len(L_final) < 2:
-            valid[i] = False
-            continue
-        p = np.polyfit(L_final, y_final, 1)
+        # 残差二次剔除，在点数少时会删光所有点，亮度采样点少时删除此环节
+        # resid = y_clean - np.polyval(p, L_clean)
+        # std = np.std(resid)
+        # mask2 = np.abs(resid) < max_resid_std * std
+        # L_final = L_clean[mask2]
+        # y_final = y_clean[mask2]
+        # if len(L_final) < 2:
+        #     valid[i] = False
+        #     continue
+        # p = np.polyfit(L_final, y_final, 1)
         k[i] = p[0]
         c[i] = p[1]
 
